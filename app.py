@@ -864,11 +864,13 @@ async def process_collection(
         f"📊 {index}/{total}"
     )
 
-    # ✅ تشغيل جميع NFTs في المجموعة بشكل متوازٍ (دفعة واحدة) مع حد أقصى 50 طلب متزامن
-    semaphore = asyncio.Semaphore(50)
+    # ✅ تشغيل جميع NFTs في المجموعة بشكل متوازٍ مع التحكم في المعدل
+    # (الحل الأول: Semaphore=5، الحل الثاني: تأخير 0.3 ثانية)
+    semaphore = asyncio.Semaphore(5)
 
     async def process_with_limit(nft):
         async with semaphore:
+            await asyncio.sleep(0.3)  # تأخير بسيط لتجنب إرسال الطلبات دفعة واحدة
             return await process_nft(session, nft)
 
     tasks = [process_with_limit(nft) for nft in nfts]
