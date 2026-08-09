@@ -232,7 +232,6 @@ async def fetch_chain_nfts(session: aiohttp.ClientSession, chain: str) -> List[D
                     if isinstance(collection_raw, dict):
                         collection_slug = collection_raw.get("slug") or "unknown"
                     elif isinstance(collection_raw, str) and collection_raw:
-                        # ✅ OpenSea API أحياناً يرجع slug مباشرة كـ string
                         collection_slug = collection_raw
                     else:
                         collection_slug = "unknown"
@@ -784,15 +783,17 @@ async def process_nft(session, nft):
     
     price_info = await get_collection_floor_price(session, collection_slug, api_chain)
 
-    # ✅ إذا لم يوجد سعر في السوق → تخطّي هذا المنتج
+    # ✅ التعديل: إذا لم يوجد سعر في السوق → استخدم السعر الافتراضي (5$)
     if not price_info["has_floor_price"]:
-        log.info(f"   ⏭️ لا يوجد سعر في السوق → تخطّي")
-        processed_nfts.add(key)
-        return True, "لا يوجد سعر في السوق"
+        log.info(f"   ⏭️ لا يوجد سعر في السوق → استخدام السعر الافتراضي ${DEFAULT_PRICE_USD:.2f}")
+        price_eth = DEFAULT_PRICE_ETH
+        price_usd = DEFAULT_PRICE_USD
+        is_usd_currency = True  # السعر الافتراضي بالدولار (USDG)
+    else:
+        price_eth = price_info["price_eth"]
+        price_usd = price_info["price_usd"]
+        is_usd_currency = price_info["is_usd_currency"]
 
-    price_eth = price_info["price_eth"]
-    price_usd = price_info["price_usd"]
-    is_usd_currency = price_info["is_usd_currency"]
     log.info(f"   💰 السعر: {price_usd:.2f}$ = {price_eth:.6f} ETH {'(USDG)' if is_usd_currency else '(ETH)'}")
 
     approved, approval_msg = await ensure_approval(nft)
@@ -863,19 +864,18 @@ async def process_collection(
         f"📊 {index}/{total}"
     )
 
-    collection_success = 0
-    collection_failed = 0
+    # ✅ تشغيل جميع NFTs في المجموعة بشكل متوازٍ (دفعة واحدة) مع حد أقصى 50 طلب متزامن
+    semaphore = asyncio.Semaphore(50)
 
-    for number, nft in enumerate(nfts, 1):
-        log.info(f"📍 Collection {index}/{total} | NFT {number}/{len(nfts)}")
-        success, _ = await process_nft(session, nft)
+    async def process_with_limit(nft):
+        async with semaphore:
+            return await process_nft(session, nft)
 
-        if success:
-            collection_success += 1
-        else:
-            collection_failed += 1
+    tasks = [process_with_limit(nft) for nft in nfts]
+    results = await asyncio.gather(*tasks)
 
-        await asyncio.sleep(WRITE_DELAY)
+    collection_success = sum(1 for success, _ in results if success)
+    collection_failed = len(results) - collection_success
 
     log.info("")
     log.info("-" * 60)
