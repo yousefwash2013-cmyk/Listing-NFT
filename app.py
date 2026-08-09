@@ -1,5 +1,5 @@
 """
-NFT LISTING SYSTEM - الإصدار الأصلي مع تعديلات بسيطة لـ Rate Limit
+NFT LISTING SYSTEM - الإصدار النهائي مع تحكم كامل في معدل الطلبات
 يدعم Robinhood Chain
 يعمل مع EIP-1559 لحل مشاكل الغاز
 """
@@ -35,10 +35,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # SETTINGS
 # ============================================================
 
-READ_DELAY = 0.5
-WRITE_DELAY = 3          # التأخير بين الطلبات (نفس القيمة الأصلية)
+READ_DELAY = 3.0          # تأخير بين صفحات جلب NFTs (ثواني)
+WRITE_DELAY = 10.0        # تأخير بين طلبات العرض (ثواني)
 ETH_PRICE_USD = 3000
-CYCLE_INTERVAL = 300
+CYCLE_INTERVAL = 600      # 10 دقائق بين الدورات
 
 # ✅ السعر الافتراضي إذا لم يوجد سعر في السوق: 5 دولار
 DEFAULT_PRICE_USD = 5.0
@@ -104,6 +104,7 @@ if not ENABLED_CHAINS:
 approval_cache = {}
 floor_price_cache = {}
 processed_nfts = set()
+collection_price_info_cache: Dict[str, Dict] = {}  # لتخزين سعر المجموعة
 
 stats = {
     "total": 0,
@@ -186,7 +187,7 @@ def api_headers():
     }
 
 # ============================================================
-# FETCH NFTs
+# FETCH NFTs (مع تأخير كبير)
 # ============================================================
 
 async def fetch_chain_nfts(session: aiohttp.ClientSession, chain: str) -> List[Dict]:
@@ -208,9 +209,9 @@ async def fetch_chain_nfts(session: aiohttp.ClientSession, chain: str) -> List[D
                 timeout=30,
             ) as response:
                 if response.status == 429:
-                    log.warning(f"⚠️ {config['name']}: Rate limit أثناء الجلب")
-                    await asyncio.sleep(10)
-                    continue
+                    log.warning(f"⚠️ {config['name']}: Rate limit أثناء الجلب، انتظار 30 ثانية...")
+                    await asyncio.sleep(30)
+                    continue  # إعادة المحاولة
 
                 if response.status != 200:
                     log.error(f"❌ {config['name']}: HTTP {response.status}")
@@ -244,6 +245,8 @@ async def fetch_chain_nfts(session: aiohttp.ClientSession, chain: str) -> List[D
                 if not cursor:
                     break
 
+                # ✅ تأخير طويل بين الصفحات
+                log.info(f"   ⏳ جلب الصفحة التالية... انتظار {READ_DELAY} ثانية")
                 await asyncio.sleep(READ_DELAY)
 
         except asyncio.TimeoutError:
@@ -262,6 +265,8 @@ async def fetch_all_nfts(session):
         nfts = await fetch_chain_nfts(session, chain)
         log.info(f"   → {len(nfts)} NFT")
         all_nfts.extend(nfts)
+        # ✅ تأخير بين الشبكات
+        await asyncio.sleep(5)
     return all_nfts
 
 def group_collections(nfts: List[Dict]):
@@ -272,7 +277,6 @@ def group_collections(nfts: List[Dict]):
     return groups
 
 MAX_LISTING_PRICE_USD = 500.0
-collection_price_info_cache: Dict[str, Dict] = {}
 
 async def get_collection_floor_price(session, collection_slug: str, api_chain: str) -> Dict:
     no_price_info = {"price_eth": 0, "price_usd": 0, "is_usd_currency": False, "has_floor_price": False}
@@ -687,14 +691,13 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
         "signature": signature,
     }
 
-    # ✅ إعادة المحاولة عند 429 (مع تأخير متزايد)
     max_retries = 5
     for attempt in range(max_retries):
         try:
             async with session.post(url, headers=api_headers(), json=payload, timeout=30) as response:
                 if response.status == 429:
-                    wait = 10 * (attempt + 1)  # 10, 20, 30, 40, 50 ثانية
-                    log.warning(f"   ⚠️ Rate limit (429)، إعادة المحاولة بعد {wait} ثوانٍ... (محاولة {attempt+1}/{max_retries})")
+                    wait = 15 * (attempt + 1)  # 15, 30, 45, 60, 75 ثانية
+                    log.warning(f"   ⚠️ Rate limit (429) في العرض، إعادة المحاولة بعد {wait} ثوانٍ... (محاولة {attempt+1}/{max_retries})")
                     await asyncio.sleep(wait)
                     continue
                 data = await response.json()
@@ -718,7 +721,7 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
     return False, "فشل بعد المحاولات"
 
 # ============================================================
-# PROCESS NFT
+# PROCESS NFT (مع تخزين سعر المجموعة)
 # ============================================================
 
 async def process_nft(session, nft):
@@ -733,7 +736,12 @@ async def process_nft(session, nft):
     api_chain = CHAINS[nft["chain"]]["api_chain"]
     collection_slug = nft.get("collection", "")
     
-    price_info = await get_collection_floor_price(session, collection_slug, api_chain)
+    # ✅ جلب سعر المجموعة مرة واحدة فقط وتخزينه في الكاش
+    if collection_slug not in collection_price_info_cache:
+        price_info = await get_collection_floor_price(session, collection_slug, api_chain)
+        collection_price_info_cache[collection_slug] = price_info
+    else:
+        price_info = collection_price_info_cache[collection_slug]
 
     # ✅ استخدام السعر الافتراضي إذا لم يوجد سعر في السوق
     if not price_info["has_floor_price"]:
@@ -787,7 +795,7 @@ async def process_nft(session, nft):
     return True, result
 
 # ============================================================
-# PROCESS COLLECTION (تسلسلي مع تأخير)
+# PROCESS COLLECTION (تسلسلي مع تأخير طويل)
 # ============================================================
 
 async def process_collection(
@@ -819,7 +827,6 @@ async def process_collection(
     collection_success = 0
     collection_failed = 0
 
-    # ✅ معالجة NFTs بشكل تسلسلي (واحد تلو الآخر) مع تأخير 3 ثوانٍ بينهم
     for number, nft in enumerate(nfts, 1):
         log.info(f"📍 Collection {index}/{total} | NFT {number}/{len(nfts)}")
         success, _ = await process_nft(session, nft)
@@ -829,7 +836,7 @@ async def process_collection(
         else:
             collection_failed += 1
 
-        # ✅ تأخير 3 ثوانٍ بين الطلبات لتجنب Rate Limit
+        # ✅ تأخير طويل بين الطلبات
         await asyncio.sleep(WRITE_DELAY)
 
     log.info("")
@@ -885,6 +892,7 @@ async def run_cycle():
     log.info(f"📅 {datetime.now()}")
     log.info(f"💰 سعر البيع الافتراضي: ${DEFAULT_PRICE_USD:.2f}")
     log.info(f"⛽ حد رسوم الغاز: ${MAX_GAS_FEE_USD:.2f}")
+    log.info(f"⏱️ تأخير الجلب: {READ_DELAY}s، تأخير العرض: {WRITE_DELAY}s")
     log.info("#" * 60)
 
     telegram("🚀 <b>بدء دورة جديدة</b>")
