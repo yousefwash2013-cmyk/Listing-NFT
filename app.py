@@ -1,5 +1,5 @@
 """
-NFT LISTING SYSTEM - الإصدار النهائي مع تحكم في معدل الطلبات وإعادة المحاولة
+NFT LISTING SYSTEM - الإصدار الأصلي مع تعديلات بسيطة لـ Rate Limit
 يدعم Robinhood Chain
 يعمل مع EIP-1559 لحل مشاكل الغاز
 """
@@ -36,22 +36,16 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # ============================================================
 
 READ_DELAY = 0.5
-WRITE_DELAY = 3
+WRITE_DELAY = 3          # التأخير بين الطلبات (نفس القيمة الأصلية)
 ETH_PRICE_USD = 3000
-CYCLE_INTERVAL = 300  # 5 دقائق بين الدورات (للاختبار)
+CYCLE_INTERVAL = 300
 
 # ✅ السعر الافتراضي إذا لم يوجد سعر في السوق: 5 دولار
 DEFAULT_PRICE_USD = 5.0
-DEFAULT_PRICE_ETH = DEFAULT_PRICE_USD / ETH_PRICE_USD  # ≈ 0.001667 ETH
+DEFAULT_PRICE_ETH = DEFAULT_PRICE_USD / ETH_PRICE_USD
 
 # ✅ حد أقصى لرسوم الغاز: 0.03 دولار
 MAX_GAS_FEE_USD = 0.03
-
-# ✅ إعدادات التحكم في معدل الطلبات
-MAX_CONCURRENT_REQUESTS = 2       # عدد الطلبات المتزامنة
-REQUEST_DELAY = 0.7               # تأخير بين الطلبات بالثواني
-MAX_RETRIES = 3                   # عدد محاولات إعادة الطلب عند 429
-RETRY_BASE_WAIT = 5               # الانتظار الأساسي عند 429 (يزداد مع كل محاولة)
 
 # ============================================================
 # LOGGING
@@ -90,13 +84,8 @@ CHAINS = {
     },
 }
 
-# ✅ conduit key الصحيح لـ OpenSea (Seaport 1.5)
 OPENSEA_CONDUIT_KEY = "0x61159fefdfada89302ed55f8b9e89e2d67d8258712b3a3f89aa88525877f1d5e"
-
-# ✅ ConduitController موجود على نفس العنوان في جميع الشبكات (CREATE2)
 CONDUIT_CONTROLLER = "0x00000000F9490004C11Cef243f5400493c00Ad63"
-
-# كاش عنوان Conduit لتجنب طلبه مرتين
 conduit_address_cache: Dict[str, str] = {}
 
 ENABLED_CHAINS = [
@@ -282,17 +271,10 @@ def group_collections(nfts: List[Dict]):
         groups[key].append(nft)
     return groups
 
-# حد أقصى للسعر الواحد (لا يعقل تسعير NFT بمليار دولار)
 MAX_LISTING_PRICE_USD = 500.0
-
-# كاش لمعلومات السعر: {slug: {"price_usdg": float, "price_eth": float, "is_usd": bool}}
 collection_price_info_cache: Dict[str, Dict] = {}
 
 async def get_collection_floor_price(session, collection_slug: str, api_chain: str) -> Dict:
-    """
-    جلب سعر السوق لـ Collection مع معلومات العملة.
-    يُرجع: {"price_eth": float, "price_usd": float, "is_usd_currency": bool, "has_floor_price": bool}
-    """
     no_price_info = {"price_eth": 0, "price_usd": 0, "is_usd_currency": False, "has_floor_price": False}
 
     if not collection_slug or collection_slug == "unknown":
@@ -321,7 +303,6 @@ async def get_collection_floor_price(session, collection_slug: str, api_chain: s
                         price_eth = floor_val
                         price_usd = floor_val * ETH_PRICE_USD
 
-                    # ✅ سقف السعر: إذا كان السعر وهمياً (أكثر من الحد الأقصى) → لا يوجد سعر حقيقي
                     if price_usd > MAX_LISTING_PRICE_USD:
                         log.warning(f"   ⚠️ سعر السوق لـ {collection_slug} وهمي ({price_usd:.2f}$) → لا يوجد سعر حقيقي")
                         info = no_price_info
@@ -336,16 +317,14 @@ async def get_collection_floor_price(session, collection_slug: str, api_chain: s
     except Exception as e:
         log.warning(f"   ⚠️ فشل جلب سعر السوق لـ {collection_slug}: {e}")
 
-    # لا يوجد سعر في السوق
     collection_price_info_cache[collection_slug] = no_price_info
     return no_price_info
 
 # ============================================================
-# ✅ CONDUIT - جلب عنوان Conduit من الـ blockchain
+# CONDUIT
 # ============================================================
 
 async def get_conduit_address(chain: str) -> Optional[str]:
-    """جلب عنوان Conduit الفعلي من ConduitController على الـ blockchain"""
     if chain in conduit_address_cache:
         return conduit_address_cache[chain]
 
@@ -391,10 +370,8 @@ async def ensure_approval(nft: Dict):
     contract_address = checksum(nft["contract"])
     owner = checksum(WALLET_ADDRESS)
 
-    # ✅ جلب عنوان Conduit الفعلي من ConduitController على الـ blockchain
     operator = await get_conduit_address(chain)
     if not operator:
-        # fallback للـ seaport إذا فشل جلب Conduit
         operator = checksum(CHAINS[chain]["seaport"])
         log.warning(f"   ⚠️ يتم استخدام Seaport بدل Conduit (fallback)")
 
@@ -447,7 +424,6 @@ async def ensure_approval(nft: Dict):
         except Exception as e:
             return False, f"فشل التحقق من الموافقة: {str(e)[:50]}"
 
-        # ✅ EIP-1559
         nonce = client.eth.get_transaction_count(owner)
         latest_block = client.eth.get_block('latest')
         base_fee = latest_block.get('baseFeePerGas', 0)
@@ -468,12 +444,10 @@ async def ensure_approval(nft: Dict):
         except Exception as e:
             tx["gas"] = 150000
 
-        # ✅ حساب رسوم الغاز
         gas_eth = tx["gas"] * max_fee / 1e18
         gas_usd = gas_eth * ETH_PRICE_USD
         log.info(f"   ⛽ رسوم الموافقة: ${gas_usd:.4f} ({gas_eth:.6f} ETH)")
 
-        # ✅ التحقق من حد رسوم الغاز (0.03 دولار)
         if gas_usd > MAX_GAS_FEE_USD:
             log.warning(f"   ⚠️ رسوم الغاز مرتفعة: ${gas_usd:.4f} > ${MAX_GAS_FEE_USD:.2f}")
             telegram(
@@ -509,10 +483,9 @@ async def ensure_approval(nft: Dict):
         return False, str(e)[:200]
 
 # ============================================================
-# ✅ CREATE LISTING - يعمل مع Robinhood + إعادة محاولة عند 429
+# CREATE LISTING (مع إعادة محاولة عند 429)
 # ============================================================
 async def get_seaport_counter(chain: str, owner: str) -> int:
-    """جلب counter الحقيقي من عقد Seaport على الـ blockchain"""
     try:
         client = get_web3(chain)
         if not client:
@@ -543,12 +516,8 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
     chain_id = config["chain_id"]
     seaport_address = checksum(config["seaport"])
 
-    # عنوان عملة ERC20 المطلوب من المجموعة (USDG على Robinhood)
     currency_address = checksum("0x5fc5360d0400a0fd4f2af552add042d716f1d168")
-    # ✅ USDG يستخدم 6 خانات عشرية (مثل USDC/USDT) وليس 18
     USDG_DECIMALS = 6
-
-    # zone الصحيح لهذه الشبكة
     zone_address_str = "0x000056f7000000ece9003ca63978907a00ffd100"
     zone_address = checksum(zone_address_str)
 
@@ -556,24 +525,19 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
     contract_address = checksum(nft["contract"])
     owner = checksum(WALLET_ADDRESS)
 
-    # ✅ حساب price_wei بالـ USDG (6 خانات عشرية دائماً لأن عملة Robinhood هي USDG)
-    # السعر بالدولار مقرّب لـ 2 خانات عشرية كحد أقصى (شرط OpenSea)
     if is_usd_currency and price_usd is not None:
         listing_price_usd = round(price_usd, 2)
     elif price_eth and price_eth > 0:
-        # تحويل ETH → USD → USDG
         listing_price_usd = round(price_eth * ETH_PRICE_USD, 2)
     else:
         listing_price_usd = round(DEFAULT_PRICE_USD, 2)
 
     price_wei = int(listing_price_usd * (10 ** USDG_DECIMALS))
 
-    # رسوم OpenSea = 100 نقطة أساس (1%)
     opensea_fee_basis_points = 100
     opensea_fee_amount = int(price_wei * opensea_fee_basis_points / 10000)
     owner_amount = price_wei - opensea_fee_amount
 
-    # ✅ جلب counter الحقيقي من الـ chain (لصحة التوقيع)
     counter = await get_seaport_counter(chain, owner)
 
     now = int(time.time())
@@ -582,14 +546,11 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
     start_time_int = now
     end_time_int = now + 86400
 
-    # ERC20 itemType = 1
     erc20_item_type = 1
-
     conduit_key_hex = OPENSEA_CONDUIT_KEY
     conduit_key_bytes = bytes.fromhex(conduit_key_hex.replace("0x", ""))
     zone_hash_bytes = bytes(32)
 
-    # بناء parameters للتوقيع EIP-712
     sign_parameters = {
         "offerer": owner,
         "zone": zone_address,
@@ -629,13 +590,12 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
         ],
     }
 
-    # التوقيع EIP-712 (Seaport v1.6)
     try:
         account = Account.from_key(PRIVATE_KEY)
 
         domain = {
             "name": "Seaport",
-            "version": "1.6",  # ✅ Seaport 1.6 على عقد 0x0000000000000068F116a894984e2DB1123eB395
+            "version": "1.6",
             "chainId": chain_id,
             "verifyingContract": seaport_address,
         }
@@ -679,7 +639,6 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
     except Exception as e:
         return False, f"فشل التوقيع: {e}"
 
-    # ✅ Payload للـ API (الحقول strings للأرقام الكبيرة)
     api_parameters = {
         "offerer": owner,
         "zone": zone_address_str,
@@ -717,7 +676,7 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
                 "recipient": checksum("0x0000a26b00c1F0DF003000390027140000fAa719"),
             },
         ],
-        "totalOriginalConsiderationItems": 2,  # 👈 إجباري لـ OpenSea API
+        "totalOriginalConsiderationItems": 2,
     }
 
     url = f"https://api.opensea.io/api/v2/orders/{api_chain}/seaport/listings"
@@ -728,13 +687,14 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
         "signature": signature,
     }
 
-    # ✅ إعادة المحاولة عند 429
-    for attempt in range(MAX_RETRIES):
+    # ✅ إعادة المحاولة عند 429 (مع تأخير متزايد)
+    max_retries = 5
+    for attempt in range(max_retries):
         try:
             async with session.post(url, headers=api_headers(), json=payload, timeout=30) as response:
                 if response.status == 429:
-                    wait = RETRY_BASE_WAIT * (attempt + 1)
-                    log.warning(f"   ⚠️ Rate limit (429)، إعادة المحاولة بعد {wait} ثوانٍ... (محاولة {attempt+1}/{MAX_RETRIES})")
+                    wait = 10 * (attempt + 1)  # 10, 20, 30, 40, 50 ثانية
+                    log.warning(f"   ⚠️ Rate limit (429)، إعادة المحاولة بعد {wait} ثوانٍ... (محاولة {attempt+1}/{max_retries})")
                     await asyncio.sleep(wait)
                     continue
                 data = await response.json()
@@ -746,48 +706,19 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
                     return False, f"OpenSea {response.status}: {data}"
         except asyncio.TimeoutError:
             log.error(f"   ❌ انتهت المهلة أثناء إرسال الطلب")
-            if attempt == MAX_RETRIES - 1:
+            if attempt == max_retries - 1:
                 return False, "انتهت المهلة"
             await asyncio.sleep(2)
         except Exception as e:
             log.error(f"   ❌ خطأ في الإرسال: {e}")
-            if attempt == MAX_RETRIES - 1:
+            if attempt == max_retries - 1:
                 return False, str(e)
             await asyncio.sleep(2)
 
     return False, "فشل بعد المحاولات"
 
 # ============================================================
-# ✅ التحقق من وجود عرض سابق للـ NFT
-# ============================================================
-
-async def is_already_listed(session, chain: str, contract: str, token_id: str) -> bool:
-    """التحقق من وجود عرض نشط للـ NFT على OpenSea"""
-    api_chain = CHAINS[chain]["api_chain"]
-    url = f"https://api.opensea.io/api/v2/orders/{api_chain}/seaport/listings"
-    params = {
-        "asset_contract_address": contract,
-        "token_ids": token_id,
-        "order_by": "created_date",
-        "order_direction": "desc",
-        "limit": 1,
-    }
-    try:
-        async with session.get(url, headers=api_headers(), params=params, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                orders = data.get("orders", [])
-                if orders:
-                    # التحقق من أن العرض نشط وليس منتهي
-                    order = orders[0]
-                    if order.get("order_hash") and not order.get("cancelled") and not order.get("finalized"):
-                        return True
-    except Exception as e:
-        log.warning(f"   ⚠️ فشل التحقق من وجود عرض سابق: {e}")
-    return False
-
-# ============================================================
-# ✅ PROCESS ONE NFT
+# PROCESS NFT
 # ============================================================
 
 async def process_nft(session, nft):
@@ -799,18 +730,17 @@ async def process_nft(session, nft):
     nft_name = nft.get('name', 'بدون اسم')
     log.info(f"   🖼️ NFT: {nft_name} | #{nft['token_id']}")
 
-    # ✅ جلب سعر السوق (الحد الأدنى)
     api_chain = CHAINS[nft["chain"]]["api_chain"]
     collection_slug = nft.get("collection", "")
     
     price_info = await get_collection_floor_price(session, collection_slug, api_chain)
 
-    # ✅ التعديل: إذا لم يوجد سعر في السوق → استخدم السعر الافتراضي (5$)
+    # ✅ استخدام السعر الافتراضي إذا لم يوجد سعر في السوق
     if not price_info["has_floor_price"]:
         log.info(f"   ⏭️ لا يوجد سعر في السوق → استخدام السعر الافتراضي ${DEFAULT_PRICE_USD:.2f}")
         price_eth = DEFAULT_PRICE_ETH
         price_usd = DEFAULT_PRICE_USD
-        is_usd_currency = True  # السعر الافتراضي بالدولار (USDG)
+        is_usd_currency = True
     else:
         price_eth = price_info["price_eth"]
         price_usd = price_info["price_usd"]
@@ -857,7 +787,7 @@ async def process_nft(session, nft):
     return True, result
 
 # ============================================================
-# PROCESS ONE COLLECTION (مع تحكم في معدل الطلبات)
+# PROCESS COLLECTION (تسلسلي مع تأخير)
 # ============================================================
 
 async def process_collection(
@@ -886,20 +816,21 @@ async def process_collection(
         f"📊 {index}/{total}"
     )
 
-    # ✅ التحكم في معدل الطلبات: عدد محدود من الطلبات المتزامنة + تأخير
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    collection_success = 0
+    collection_failed = 0
 
-    async def process_with_limit(nft):
-        async with semaphore:
-            # تأخير بسيط لتوزيع الطلبات على الزمن
-            await asyncio.sleep(REQUEST_DELAY)
-            return await process_nft(session, nft)
+    # ✅ معالجة NFTs بشكل تسلسلي (واحد تلو الآخر) مع تأخير 3 ثوانٍ بينهم
+    for number, nft in enumerate(nfts, 1):
+        log.info(f"📍 Collection {index}/{total} | NFT {number}/{len(nfts)}")
+        success, _ = await process_nft(session, nft)
 
-    tasks = [process_with_limit(nft) for nft in nfts]
-    results = await asyncio.gather(*tasks)
+        if success:
+            collection_success += 1
+        else:
+            collection_failed += 1
 
-    collection_success = sum(1 for success, _ in results if success)
-    collection_failed = len(results) - collection_success
+        # ✅ تأخير 3 ثوانٍ بين الطلبات لتجنب Rate Limit
+        await asyncio.sleep(WRITE_DELAY)
 
     log.info("")
     log.info("-" * 60)
@@ -954,7 +885,6 @@ async def run_cycle():
     log.info(f"📅 {datetime.now()}")
     log.info(f"💰 سعر البيع الافتراضي: ${DEFAULT_PRICE_USD:.2f}")
     log.info(f"⛽ حد رسوم الغاز: ${MAX_GAS_FEE_USD:.2f}")
-    log.info(f"📊 الطلبات المتزامنة: {MAX_CONCURRENT_REQUESTS}, تأخير: {REQUEST_DELAY}s")
     log.info("#" * 60)
 
     telegram("🚀 <b>بدء دورة جديدة</b>")
