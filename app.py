@@ -47,6 +47,9 @@ DEFAULT_PRICE_ETH = DEFAULT_PRICE_USD / ETH_PRICE_USD  # ≈ 0.001667 ETH
 # ✅ حد أقصى لرسوم الغاز: 0.03 دولار
 MAX_GAS_FEE_USD = 0.03
 
+# ✅ مدة العرض: 3 أشهر (تقريباً 90 يوم)
+LISTING_DURATION_SECONDS = 90 * 24 * 60 * 60
+
 # ============================================================
 # LOGGING
 # ============================================================
@@ -575,7 +578,8 @@ async def create_listing(session, nft, price_eth: float, is_usd_currency: bool =
     salt_val = int(time.time() * 1000)
 
     start_time_int = now
-    end_time_int = now + 86400
+    # ✅ تعديل مدة العرض إلى 3 أشهر (استخدام الثابت المُعرّف)
+    end_time_int = now + LISTING_DURATION_SECONDS
 
     # ERC20 itemType = 1
     erc20_item_type = 1
