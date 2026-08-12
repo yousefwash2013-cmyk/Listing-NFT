@@ -764,13 +764,16 @@ async def is_already_listed(session, chain: str, contract: str, token_id: str) -
                     # التحقق من أن العرض نشط وليس منتهي
                     order = orders[0]
                     if order.get("order_hash") and not order.get("cancelled") and not order.get("finalized"):
-                        return True
+                        # أيضاً نتحقق من انتهاء المدة
+                        end_time = int(order.get("end_time", 0))
+                        if end_time == 0 or end_time > int(time.time()):
+                            return True
     except Exception as e:
         log.warning(f"   ⚠️ فشل التحقق من وجود عرض سابق: {e}")
     return False
 
 # ============================================================
-# ✅ PROCESS ONE NFT
+# ✅ PROCESS ONE NFT (تم تعديلها لإضافة فحص العرض النشط)
 # ============================================================
 
 async def process_nft(session, nft):
@@ -798,6 +801,20 @@ async def process_nft(session, nft):
     price_usd = price_info["price_usd"]
     is_usd_currency = price_info["is_usd_currency"]
     log.info(f"   💰 السعر: {price_usd:.2f}$ = {price_eth:.6f} ETH {'(USDG)' if is_usd_currency else '(ETH)'}")
+
+    # ================= التعديل الجديد =================
+    # ✅ التحقق مما إذا كان الـ NFT معروضاً بالفعل (عرض نشط)
+    already_listed = await is_already_listed(
+        session,
+        nft["chain"],
+        nft["contract"],
+        nft["token_id"]
+    )
+    if already_listed:
+        log.info(f"   ⏭️ NFT معروض بالفعل (عرض نشط) → تخطّي")
+        processed_nfts.add(key)
+        return True, "معروض بالفعل"
+    # =================================================
 
     approved, approval_msg = await ensure_approval(nft)
     if not approved:
